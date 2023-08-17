@@ -17,14 +17,14 @@ Copyright (c) 2019, 2021 - IBM Corp.
  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-
-//import necessry library 
+//import necessry function
 const express = require("express");
 const { Issuer } = require("openid-client");
 const storage = require('node-persist')
 const session = require("express-session");
 const app = express();
 const path = require("path");
+const { env } = require("process");
 // init session
 app.use(
   session({
@@ -33,22 +33,22 @@ app.use(
     saveUninitialized: true,
   })
 );
-//reading env
+// reading env
 require("dotenv").config({ path: "./.env" });
 
 
-//middleware
+// middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.set("view engine", "pug");
 app.set("views", path.join(__dirname, "views"));
 
-//storage.init();
+// storage.init();
 storage.init();
-
-const port = 5000;
+// setting port address
+const port = process.env.PORT;
 const http = require("http").Server(app);
-//init io
+// init io
 const io = require("socket.io")(http);
 // function for setUp OIDC
 async function setupOIDC() {
