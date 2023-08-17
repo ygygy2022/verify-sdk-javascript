@@ -17,131 +17,178 @@ Copyright (c) 2019, 2021 - IBM Corp.
  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-require('dotenv').config({path: './.env'});
-const express = require('express');
-const path = require('path');
-const {OAuthContext} = require('ibm-verify-sdk');
-const session = require('express-session');
-const storage = require('node-persist');
 
-const app = express();
-app.use(session({
-	secret: 'my-secret',
-  resave: true,
-  saveUninitialized: true,
-}));
+//import necessry library 
+const express = require("express");
+const { Issuer } = require("openid-client");
+const storage = require('node-persist')
+const session = require("express-session");
+const app = express();
+const path = require("path");
+// init session
+app.use(
+  session({
+    secret: "my-secret",
+    resave: true,
+    saveUninitialized: true,
+  })
+);
+//reading env
+require("dotenv").config({ path: "./.env" });
 
+
+//middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-app.set('view engine', 'pug');
-app.set('views', path.join(__dirname, 'views'));
+app.set("view engine", "pug");
+app.set("views", path.join(__dirname, "views"));
 
+//storage.init();
 storage.init();
 
-const http = require('http').Server(app);
-const io = require('socket.io')(http);
+const port = 5000;
+const http = require("http").Server(app);
+//init io
+const io = require("socket.io")(http);
+// function for setUp OIDC
+async function setupOIDC() {
+  const issuer = await Issuer.discover(
+    "https://student-devportal.rel.verify.ibmcloudsecurity.com/v1.0/endpoint/default/.well-known/openid-configuration"
+  );
+  const client = new issuer.Client({
+    client_id: process.env.CLIENT_ID,
+    client_secret: process.env.CLIENT_SECRET,
+  });
 
-let config = {
-	tenantUrl : process.env.TENANT_URL,
-	clientId : process.env.CLIENT_ID,
-	clientSecret : process.env.CLIENT_SECRET,
-	flowType : process.env.FLOW_TYPE,
-	scope : process.env.SCOPE
+  return client;
+}
+
+// function for get verity Token
+const verifyToken = async (req, res, next) => {
+  const token = await storage.getItem("tokenSet");
+  if (token) {
+    req.session.token = token;
+    next();
+  } else {
+    res.redirect("/");
+  }
 };
 
-let deviceFlow = new OAuthContext(config);
+// setting front page
+app.get("/", (req, res) => {
+  res.render("index");
+});
 
+// initialize the OIDC client
+setupOIDC()
+  .then((client) => {
+    // authorization endpoint
+    app.get("/authorize", async (req, res) => {
+      const params = {
+        client_id: process.env.CLIENT_ID,
+        scope: process.env.SCOPE,
+        response_type: "device_code",
+      };
 
-const verifyToken = async(req, res, next) => {
+      const deviceCodeResponse = await client.deviceAuthorization(params);
 
-	const token = await storage.getItem(req.sessionID);
-	if(token) {
-		req.session.token = token;
-		next();
-	} else {
-		res.redirect('/');
-	}
+      // set session variables
+      req.session.deviceCode = deviceCodeResponse.device_code;
+      req.session.userCode = deviceCodeResponse.user_code;
+      console.log("========= req.session.deviceCode", req.session);
 
+      // io.emit("authInfo", {
+      //   deviceCode: deviceCodeResponse.device_code,
+      //   userCode: deviceCodeResponse.user_code,
+      // });
+      //send url to client
+      res.render("authorize", {
+        userCode: deviceCodeResponse.user_code,
+        verificationUri: deviceCodeResponse.verification_uri,
+        qrCode: deviceCodeResponse.verification_uri_complete,
+      });
+      // start polling for authentication status
+      pollAuthenticationStatus(deviceCodeResponse, client);
+    });
+
+    // authenticated page
+    app.get("/authenticated", verifyToken, async (req, res) => {
+      console.log("======== Requesting userInfo claims using valid token");
+      const token = await storage.getItem("tokenSet");
+      console.log("======== token", token);
+      const userinfo = await client
+        .userinfo(token.access_token)
+        .catch((err) => {
+          console.log(err);
+        });
+      res.render("authenticated", {
+        message: "successfully authenticated",
+        userInfo: userinfo,
+      });
+      console.log("======== userinfo", userinfo);
+    });
+
+    // logout
+    app.get("/logout", async (req, res) => {
+      // destroy session
+      req.session.destroy(() => {
+        res.redirect("/");
+      });
+      const token = await storage.getItem("tokenSet");
+      // revoke token from storage
+      await storage.removeItem("tokenSet").catch(console.error);
+      // revoke token from OP
+      const result = await client.revoke(token.access_token);
+      // check result
+      console.log(result);
+    });
+  })
+  .catch(console.error);
+
+// start server
+http.listen(port, () => {
+  console.log(`Server is running on http://localhost:${port}`);
+});
+// socket.io
+io.on("connection", function (socket) {
+  console.log("node client connected");
+  socket.on("disconnect", function () {
+    console.log("client disconnected");
+  });
+});
+// function to poll for authentication status
+async function pollAuthenticationStatus(req, client) {
+  //set params for token request
+  const params = {
+    client_id: client.client_id,
+    client_secret: client.client_secret,
+    device_code: req.device_code,
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+  };
+  //set authCompleted to false
+  let authCompleted = false;
+  //loop until authCompleted is true
+  while (!authCompleted) {
+    try {
+      //check if tokenSet is valid
+      const tokenSet = await client.grant(params);
+      // save tokenSet to storage
+      await storage.setItem("tokenSet", tokenSet).catch(console.error);
+      console.log("========= userinfo", tokenSet);
+      // if tokenSet is valid, end the loop
+      authCompleted = true;
+      // emit success event to client and redirect to authenticated page
+      await io.emit("success", { auth: "/authenticated" });
+    } catch (err) {
+      // check if error is OPError
+      if (err.name === "OPError") {
+        // set auto polling interval
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+      } else {
+        // if error is not OPError, end the loop
+        console.log(err);
+        break;
+      }
+    }
+  }
 }
-
-app.get('/', (req, res) => {
-	res.render('index');
-});
-
-app.get('/authenticated', verifyToken, (req, res) => {
-	console.log('======== Requesting userInfo claims using valid token');
-		deviceFlow.userInfo(req.session.token)
-		.then((response) => {
-			res.render('authenticated', {message: 'successfully authenticated', userInfo: response.response});
-		}).catch((err) => {
-			res.send(err);
-		});
-});
-
-app.get('/authorize', (req, res) => {
-	console.log('======== Calling device_authorization endpoint')
-		deviceFlow.authorize()
-			.then((response) => {
-				console.log('======== API response: ', response);
-				res.render('authorize', {
-					userCode: response.user_code,
-					verificationUri: response.verification_uri,
-					qrCode: response.verification_uri_complete_qrcode
-				}, pollToken(response.device_code, req.sessionID));
-			})
-			.catch((error)=> {
-				console.log("========= API error trying to call device_authorization endpoint:", error);
-			});
-});
-
-app.get('/logout', async(req, res) => {
-	if(!req.session.token){
-		console.log('======== No token stored in session')
-		res.redirect('/');
-		return;
-	}
-	console.log('======== Attempting to revoke access_token');
-	deviceFlow.revokeToken(req.session.token, 'access_token')
-	.then(async() => {
-		console.log('======== Successfully revoked access token');
-		await storage.removeItem(req.sessionID);
-		console.log('======== Removing token session from storage');
-		res.redirect(302, '/')
-	})
-	.catch((error) => {
-		console.log('========= Token revocation error: ', error)
-	})
-})
-
-io.on('connection', function(socket) {
-	console.log('node client connected');
-	socket.on('disconnect', function() {
-		console.log('client disconnected');
-	});
-});
-
-
-function pollToken(device_code, sessionID ) {
-	let deviceCode = device_code;
-	let timeoutInterval = 5000;
-	console.log("========= Polling token api");
-	deviceFlow.pollTokenApi(deviceCode, timeoutInterval)
-	.then(async(response) => {
-		console.log('========= Token response object: ', response);
-		try {
-			await storage.setItem(sessionID, {...response});
-			await io.emit('success', {auth: '/authenticated'});
-		} catch (error) {
-			console.log('========= Error setting sotrage for session');
-			return error;
-		}
-	})
-	.catch((err) => {
-		console.log('========= Polling error: ', err);
-	});
-}
-
-http.listen(3000, () => {
-	console.log('Server started');
-	console.log('Navigate to http://localhost:3000');
-});
