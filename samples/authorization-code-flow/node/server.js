@@ -1,15 +1,18 @@
+// Import library 
 const express = require('express');
 const session = require('express-session');
-const {OAuthContext} = require('ibm-verify-sdk');
+const {Issuer, generators} = require('openid-client');
 const path = require('path');
 const app = express();
 
+// Init session
 app.use(session({
   secret: 'my-secret',
   resave: true,
   saveUninitialized: false
 }));
 
+//middleware
 app.set('view engine', 'pug');
 app.set('views', path.join(__dirname, 'front-end'));
 app.use(express.json());
@@ -17,18 +20,20 @@ app.use(express.urlencoded({ extended: false }));
 
 // load contents of .env into process.env
 require('dotenv').config();
+// 
+async function setUpOIDC(){
+	const issuer = await Issuer.discover('https://student-devportal.rel.verify.ibmcloudsecurity.com/oidc/endpoint/default/.well-known/openid-configuration');
+	const client = new issuer.Client({
+		client_id: process.env.CLIENT_ID,
+		client_secret: process.env.CLIENT_SECRET,
+		redirect_uris: process.env.REDIRECT_URI,
+		response_typese:process.env.RESPONSE_TYPE
+	});
+	console.log('client', client)
+	return client;
+}
 
-const config = {
-	tenantUrl            : process.env.TENANT_URL,
-	clientId             : process.env.CLIENT_ID,
-	clientSecret         : process.env.CLIENT_SECRET,
-	redirectUri          : process.env.REDIRECT_URI,
-	responseType         : process.env.RESPONSE_TYPE,
-	flowType             : process.env.FLOW_TYPE,
-	scope                : process.env.SCOPE
-};
 
-const authClient = new OAuthContext(config);
 
 // Home route
 app.get('/', (req,res) => {
@@ -38,68 +43,61 @@ app.get('/', (req,res) => {
     res.render('index')
   }
 });
-app.get('/login', (req, res) => {
-	authClient.authenticate().then((url) => {
-		console.log(`("======== Authentication redirect to: \n ${url}`);
-		res.redirect(url);
-	}).catch(error => {
-		console.log(`There was an error with the authentication process:`, error);
-		res.send(error);
-	})
-})
 
-app.get(process.env.REDIRECT_URI_ROUTE, (req, res) => {
-	authClient.getToken(req.url).then(token => {
-		token.expiry = new Date().getTime() + (token.expires_in * 1000);
-		console.log("======== Token details:");
-		console.log(token);
-		req.session.token = token;
-		res.redirect('/dashboard');
-	}).catch(error => {
-			res.send("ERROR: " + error);
+// Login require
+// store the code_verifier in your framework's session mechanism, if it is a cookie based solution
+// it should be httpOnly (not readable by javascript) and encrypted.
+
+app.get('/login', async(req, res) => {
+	const client = await setUpOIDC();
+	const url = client.authorizationUrl({
+		scope:process.env.SCOPE,
+		state:generators.state(),
+		redirect_uri:process.env.REDIRECT_URI,
+		response_types:process.env.RESPONSE_TYPE,
 	});
+	res.redirect(url);
 });
 
 
+app.get('/redirect', async (req, res) => {
+		const client = await setUpOIDC();
+		const params = client.callbackParams(req);
+		const tokenSet = await client.callback(process.env.REDIRECT_URI, 
+			params, { state: req.query.state, nonce: req.session.nonce });
+		const userinfo = await client.userinfo(tokenSet.access_token);
+		req.session.tokenSet = tokenSet;
+		req.session.userinfo = userinfo;
+	    console.log(userinfo);
+		res.redirect('/dashboard');
+	  });
+
+// Page for render userInfo
 app.get('/dashboard', (req, res) => {
-	if(req.session.token){
-		console.log('======== Requesting userInfo claims using valid token');
-		authClient.userInfo(req.session.token)
-			.then((response) => {
-				res.render('dashboard', {userInfo :response.response});
-			}).catch((err) => {
-				res.json(err);
-			});
-	} else {
-		console.log('======== Current session had no token available.')
-		res.redirect('/login')
+	const userinfo = req.session.userinfo;
+	if (!userinfo) {
+	  return res.redirect('/login');
 	}
-})
+	console.log('======== Requesting userInfo claims using valid token');
+	res.render('dashboard', {userInfo :userinfo});
+  });
+  
+  app.get('/logout', async (req, res) => {
+	// import client
+	const client = await setUpOIDC();
+	// get token from session
+	const token = req.session.tokenSet;
+	console.log(token);
+      // check result
+	req.session.destroy(() => {
+	  res.redirect('/');
+	});
+	// logout from OP ? doesn't work
+	await client.revoke(token.access_token).catch(console.error);
+  });
 
-// delete token from storage when logging out
-app.get('/logout', (req, res) => {
-	if(!req.session.token){
-		console.log('======== No token stored in session')
-		res.redirect('/');
-		return;
-	}
-	console.log('======== Attempting to revoke access_token')
-	authClient.revokeToken(req.session.token, 'access_token')
-	 .then(() => {
-		 console.log('======== Successfully revoked access token');
-		 delete req.session.token;
-		 console.log('======== Deleteing token session');
-		 console.log('======== Logout session successful');
-			res.redirect('/');
-	 })
-	 .catch((err) => {
-		console.log('======== Error revoking token: ', err)
-		 res.redirect('/');
-	 })
-});
-
-
-app.listen(3000, () => {
+// Listen PORT
+app.listen  (process.env.PORT, async () => {
 	console.log('Server started');
-	console.log('Navigate to http://localhost:3000');
+	console.log(`Navigate to http://localhost:${process.env.PORT}`);
 });
