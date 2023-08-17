@@ -17,56 +17,84 @@ Copyright (c) 2019, 2021 - IBM Corp.
  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-const {OAuthContext} = require('ibm-verify-sdk');
-const rls = require('readline-sync');
+// import necessary library
+const express = require("express");
+const axios = require("axios");
+const rls = require("readline-sync");
+const app = express();
+// set urlencoded
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+// loading .env as envirmental file
+require("dotenv").config();
 
-require('dotenv').config();
-
+// import user data from env
 const config = {
-    tenantUrl: process.env.TENANT_URL,
-    clientId: process.env.CLIENT_ID,
-    clientSecret: process.env.CLIENT_SECRET,
-    flowType: process.env.FLOW_TYPE,
-    scope: process.env.SCOPE,
+  tenantUrl: process.env.TENANT_URL,
+  clientId: process.env.CLIENT_ID,
+  clientSecret: process.env.CLIENT_SECRET,
+  flowType: process.env.FLOW_TYPE,
+  scope: process.env.SCOPE,
 };
 
-
-async function login() {
-    try {
-        return await ROPC.login(username, password);
-    } catch (error) {
-        throw error;
-    }
-}
-
-
-console.log('ibm-verify-sdk ROPC sample application\n\n');
-
-console.log('Authenticate against');
+// welcome information
+console.log("Openid-connect ROPC sample application\n\n");
+console.log("Authenticate against");
 console.log(`tenant    : ${config.tenantUrl}`);
 console.log(`client ID : ${config.clientId}\n\n`);
 
-const ROPC = new OAuthContext(config);
+// gather user password and username
+const username = rls.question("username: ");
+const password = rls.question("password: ", { hideEchoBack: true });
 
-const username = rls.question('username: ');
-const password = rls.question('password: ', { hideEchoBack: true });
+// POST method for post necessary date to server and get Token
+const optionsGetToken = {
+  method: "POST",
+  url: "https://student-devportal.rel.verify.ibmcloudsecurity.com/v1.0/endpoint/default/token",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  data: new URLSearchParams({
+    grant_type: "password",
+    username: username,
+    password: password,
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+  }),
+};
 
-let token;
+//send request to server for getting token
+axios
+  .request(optionsGetToken)
+  .then(function (token) {
+    console.log(`=================================Tokens are`,token.data);
+    // POST method for post necessary date to server and get User jwt
+    const optionsGetUserInfo = {
+      method: "POST",
+      url: "https://student-devportal.rel.verify.ibmcloudsecurity.com/v1.0/endpoint/default/userinfo",
+      headers: { "content-type": "application/x-www-form-urlencoded","accept":"application/json" },
+      data: new URLSearchParams({
+        access_token: token.data.access_token,
+        token_type: token.data.token_type,
+        refresh_token: token.data.refresh_token,
+        expires_in: token.data.expires_in,
+        id_token: token.data.id_token,
+      }),
+    };
+    //send request to server for receive User Info
+    axios
+    .request(optionsGetUserInfo)
+    .then(function (userInfo) {
+      console.log(`=================================UserInfos are`, userInfo.data);
+    }).catch(function (error) {
+    console.error(error);
+  });
+  })
+  .catch(function (error) {
+    console.error(error);
+  });
 
-console.log('\n\nAuthenticating...');
-login().then(t => {
-    token = t;
 
-    console.log('Successfully authenticated\n\n');
-    console.log('Retrieving user information...');
-    ROPC.userInfo(token).then(r => {
-        console.log('Successfully retrieved user information\n\n');
-        console.log(r.response);
-    }).catch(e => {
-        console.log('Error occured while retrieving user information');
-        console.log(e);
-    });
-}).catch(e => {
-    console.log('Error occured while authenticating', e.message);
+ 
+// listening server
+app.listen(process.env.PORT, () => {
+  console.log(`App listening on port ${process.env.PORT}`);
 });
-
